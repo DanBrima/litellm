@@ -1,0 +1,67 @@
+diff --git a/litellm/proxy/hooks/parallel_request_limiter_v3.py b/litellm/proxy/hooks/parallel_request_limiter_v3.py
+index 2d799ded7..d7f701a94 100644
+--- a/litellm/proxy/hooks/parallel_request_limiter_v3.py
++++ b/litellm/proxy/hooks/parallel_request_limiter_v3.py
+@@ -2797,6 +2797,23 @@ class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
+ 
+         return descriptors
+ 
++    @staticmethod
++    def _deduplicate_descriptors(
++        descriptors: Sequence[RateLimitDescriptor],
++    ) -> list[RateLimitDescriptor]:
++        """
++        Collapse descriptors repeating a (key, value) pair to their first occurrence.
++
++        A descriptor identifies one counter, and every consumer below charges
++        the request once per descriptor it is given. A repeat therefore
++        increments the sliding window twice and reserves TPM tokens twice
++        against that same counter, halving the limit the operator configured.
++        """
++        by_identity: Final[dict[tuple[str, str], RateLimitDescriptor]] = {}
++        for descriptor in descriptors:
++            by_identity.setdefault((descriptor["key"], descriptor["value"]), descriptor)
++        return list(by_identity.values())
++
+     async def _check_model_has_recent_failures(
+         self,
+         model: str,
+@@ -3418,7 +3435,7 @@ class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
+             )
+ 
+         # Create rate limit descriptors
+-        descriptors: Final = self._create_rate_limit_descriptors(
++        assembled_descriptors: Final = self._create_rate_limit_descriptors(
+             user_api_key_dict=user_api_key_dict,
+             data=data,
+             rpm_limit_type=rpm_limit_type,
+@@ -3431,23 +3448,25 @@ class _PROXY_MaxParallelRequestsHandler_v3(CustomLogger):
+         self._add_team_model_rate_limit_descriptor_from_metadata(
+             user_api_key_dict=user_api_key_dict,
+             requested_model=requested_model,
+-            descriptors=descriptors,
++            descriptors=assembled_descriptors,
+         )
+ 
+         # Project Level Rate Limits
+         self._add_project_model_rate_limit_descriptor_from_metadata(
+             user_api_key_dict=user_api_key_dict,
+             requested_model=requested_model,
+-            descriptors=descriptors,
++            descriptors=assembled_descriptors,
+         )
+         self.add_project_io_token_rate_limit_descriptors_from_metadata(
+             user_api_key_dict=user_api_key_dict,
+             requested_model=requested_model,
+-            descriptors=descriptors,
++            descriptors=assembled_descriptors,
+         )
+ 
+         # Org Level Rate Limits
+-        descriptors.extend(self.create_organization_rate_limit_descriptor(user_api_key_dict, requested_model))
++        assembled_descriptors.extend(self.create_organization_rate_limit_descriptor(user_api_key_dict, requested_model))
++
++        descriptors: Final = self._deduplicate_descriptors(assembled_descriptors)
+ 
+         # Only check rate limits if we have descriptors with actual limits
+         if descriptors:
