@@ -10,7 +10,7 @@
       "before": "cc2a28b1a77b0522d4a0cf742c4767272ba4aa69e2eb4cf82f88aaac5fc57316"
     },
     "litellm/proxy/hooks/parallel_request_limiter_v3.py": {
-      "after": "aecdff6e7d08280dadc12176a2dcb36fb62e12bd546719bf006e6671040876c4",
+      "after": "d5942c2231265510fb3dbab30b35ac7fa0ac5762e8361581173ec3f0245728f5",
       "before": "a63203ac497c3d4d418766c319a94774faed45381449efcead06403c7eca9ed3"
     },
     "litellm/types/integrations/prometheus.py": {

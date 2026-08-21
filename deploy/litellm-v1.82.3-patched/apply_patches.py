@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -117,6 +116,29 @@ def sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def refresh_bytecode(target: Path) -> None:
+    """
+    Replace the cached bytecode for one patched module.
+
+    Only this module's ``.pyc`` files are dropped, never the whole
+    ``__pycache__``, so the rest of the package keeps its precompiled cache.
+    The image then recompiles here, as root, because the runtime user of the
+    non-root image cannot write into site-packages and would otherwise pay for
+    the recompile on every container start.
+    """
+    import py_compile  # noqa: PLC0415  - only needed on the write path
+
+    for stale in target.parent.glob(f"__pycache__/{target.stem}.*.pyc"):
+        stale.unlink(missing_ok=True)
+    try:
+        py_compile.compile(str(target), doraise=True)
+    except (py_compile.PyCompileError, OSError) as exc:
+        # A read-only or unwritable cache directory is not fatal: Python just
+        # recompiles at import time. A syntax error is, and cannot happen here
+        # because the result was SHA-256 matched a line above.
+        print(f"    (bytecode not cached for {target.name}: {exc})")
+
+
 def litellm_package_roots(extra: tuple[Path, ...]) -> tuple[Path, ...]:
     """
     Every directory holding a ``litellm`` package this image might import.
@@ -173,7 +195,7 @@ def patch_root(root: Path, patches: tuple[FilePatch, ...], manifest: dict, dry_r
             )
         if not dry_run:
             target.write_text(patched_text, encoding="utf-8")
-            shutil.rmtree(target.parent / "__pycache__", ignore_errors=True)
+            refresh_bytecode(target)
         print(f"    patched: {file_patch.path}")
         changed += 1
     return changed

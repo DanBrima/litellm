@@ -1,38 +1,65 @@
 --- a/litellm/proxy/hooks/parallel_request_limiter_v3.py
 +++ b/litellm/proxy/hooks/parallel_request_limiter_v3.py
-@@ -15,6 +15,7 @@
+@@ -7,6 +7,7 @@
+ import binascii
+ import os
+ from datetime import datetime
++from types import MappingProxyType
+ from typing import (
+     TYPE_CHECKING,
+     Any,
+@@ -15,6 +16,8 @@
      List,
      Literal,
      Optional,
++    Sequence,
 +    Tuple,
      TypedDict,
      Union,
      cast,
-@@ -1055,6 +1056,23 @@
+@@ -447,7 +450,7 @@
+ 
+     async def should_rate_limit(
+         self,
+-        descriptors: List[RateLimitDescriptor],
++        descriptors: Sequence[RateLimitDescriptor],
+         parent_otel_span: Optional[Span] = None,
+         read_only: bool = False,
+     ) -> RateLimitResponse:
+@@ -1055,6 +1058,23 @@
  
          return descriptors
  
 +    @staticmethod
 +    def _deduplicate_descriptors(
-+        descriptors: List[RateLimitDescriptor],
-+    ) -> List[RateLimitDescriptor]:
++        descriptors: Sequence[RateLimitDescriptor],
++    ) -> Tuple[RateLimitDescriptor, ...]:
 +        """
-+        Collapse descriptors repeating a (key, value) pair to their first occurrence.
++        Collapse descriptors repeating a (key, value) pair into one entry.
 +
 +        A descriptor identifies one counter, and every consumer below charges
 +        the request once per descriptor it is given. A repeat therefore
 +        increments the sliding window twice and reserves TPM tokens twice
 +        against that same counter, halving the limit the operator configured.
 +        """
-+        by_identity: Dict[Tuple[str, str], RateLimitDescriptor] = {}
-+        for descriptor in descriptors:
-+            by_identity.setdefault((descriptor["key"], descriptor["value"]), descriptor)
-+        return list(by_identity.values())
++        by_identity = MappingProxyType(
++            {(d["key"], d["value"]): d for d in descriptors}
++        )
++        return tuple(by_identity.values())
 +
      async def _check_model_has_recent_failures(
          self,
          model: str,
-@@ -1267,7 +1285,7 @@
+@@ -1174,7 +1194,7 @@
+     def _handle_rate_limit_error(
+         self,
+         response: RateLimitResponse,
+-        descriptors: List[RateLimitDescriptor],
++        descriptors: Sequence[RateLimitDescriptor],
+     ) -> None:
+         """Handle rate limit exceeded error by raising HTTPException."""
+         for status in response["statuses"]:
+@@ -1267,7 +1287,7 @@
              )
  
          # Create rate limit descriptors
@@ -41,7 +68,7 @@
              user_api_key_dict=user_api_key_dict,
              data=data,
              rpm_limit_type=rpm_limit_type,
-@@ -1279,15 +1297,18 @@
+@@ -1279,15 +1299,18 @@
          self._add_team_model_rate_limit_descriptor_from_metadata(
              user_api_key_dict=user_api_key_dict,
              requested_model=requested_model,

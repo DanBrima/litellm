@@ -133,33 +133,54 @@ async def test_team_and_key_counters_stay_in_step():
     assert team["limit_remaining"] == key["limit_remaining"]
 
 
-def test_deduplication_keeps_the_first_of_each_repeated_descriptor():
-    first = RateLimitDescriptor(
+def test_a_repeated_descriptor_collapses_to_one_entry():
+    """
+    One (key, value) pair is one counter, so it may appear at most once no
+    matter how many times the assembly path produced it.
+    """
+    earlier = RateLimitDescriptor(
         key="model_per_team",
         value=f"{TEAM_ID}:{MODEL}",
         rate_limit={"requests_per_unit": 10, "tokens_per_unit": None, "window_size": 60},
     )
-    repeat = RateLimitDescriptor(
+    later = RateLimitDescriptor(
         key="model_per_team",
         value=f"{TEAM_ID}:{MODEL}",
         rate_limit={"requests_per_unit": 999, "tokens_per_unit": None, "window_size": 60},
     )
 
-    deduplicated = _PROXY_MaxParallelRequestsHandler_v3._deduplicate_descriptors([first, repeat])
+    deduplicated = _PROXY_MaxParallelRequestsHandler_v3._deduplicate_descriptors([earlier, later])
 
-    assert deduplicated == [first]
+    assert deduplicated == (later,)
 
 
 def test_deduplication_keeps_every_distinct_descriptor_in_order():
-    descriptors = [
+    descriptors = (
         RateLimitDescriptor(key="key", value="sk-1", rate_limit={"requests_per_unit": 1}),
         RateLimitDescriptor(key="team", value=TEAM_ID, rate_limit={"requests_per_unit": 2}),
         RateLimitDescriptor(key="model_per_team", value=f"{TEAM_ID}:{MODEL}", rate_limit={"requests_per_unit": 3}),
         RateLimitDescriptor(key="model_per_key", value=f"sk-1:{MODEL}", rate_limit={"requests_per_unit": 4}),
         RateLimitDescriptor(key="model_per_team", value=f"other:{MODEL}", rate_limit={"requests_per_unit": 5}),
-    ]
+    )
 
     assert _PROXY_MaxParallelRequestsHandler_v3._deduplicate_descriptors(descriptors) == descriptors
+
+
+def test_deduplication_hands_consumers_something_they_cannot_mutate():
+    """
+    The descriptor list is assembled by several appenders and then frozen. A
+    consumer that appends to what it was given would reintroduce exactly the
+    double count this fix removes.
+    """
+    deduplicated = _PROXY_MaxParallelRequestsHandler_v3._deduplicate_descriptors(
+        [RateLimitDescriptor(key="team", value=TEAM_ID, rate_limit={"requests_per_unit": 1})]
+    )
+
+    assert isinstance(deduplicated, tuple)
+    with pytest.raises(AttributeError):
+        deduplicated.append(  # type: ignore[attr-defined]
+            RateLimitDescriptor(key="team", value=TEAM_ID, rate_limit={"requests_per_unit": 1})
+        )
 
 
 def test_descriptor_builder_still_covers_team_limits_on_its_own():

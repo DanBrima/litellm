@@ -4,27 +4,41 @@
 #
 #   ./build.sh                        # build, verify, save dist/<image>.tar
 #   IMAGE_TAG=my-registry/litellm:1.82.3-p1 ./build.sh
-#   BASE_IMAGE=ghcr.io/berriai/litellm@sha256:... ./build.sh
+#   BASE_IMAGE=ghcr.io/berriai/litellm-non_root@sha256:... ./build.sh
 #   SKIP_TESTS=1 ./build.sh           # skip the in-container test run
 #
 # The in-container test run installs pytest, so it needs network. Set
 # SKIP_TESTS=1 for an air-gapped build; the Dockerfile's own SHA-256 and import
 # checks still run either way.
+#
+# The default base is the non-root image, which runs as `nobody`. Override
+# BASE_IMAGE and RUNTIME_USER together to build on a different variant
+# (the root image is `ghcr.io/berriai/litellm:v1.82.3` with RUNTIME_USER=root).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASE_IMAGE="${BASE_IMAGE:-ghcr.io/berriai/litellm:v1.82.3}"
-IMAGE_TAG="${IMAGE_TAG:-litellm:v1.82.3-team-rate-limits}"
+BASE_IMAGE="${BASE_IMAGE:-ghcr.io/berriai/litellm-non_root:main-v1.82.3}"
+RUNTIME_USER="${RUNTIME_USER:-nobody}"
+IMAGE_TAG="${IMAGE_TAG:-litellm-non_root:v1.82.3-team-rate-limits}"
 OUT_DIR="${OUT_DIR:-${HERE}/dist}"
 TAR_NAME="${TAR_NAME:-litellm-v1.82.3-team-rate-limits.tar}"
 SKIP_TESTS="${SKIP_TESTS:-0}"
 
-echo "==> building ${IMAGE_TAG} from ${BASE_IMAGE}"
+echo "==> building ${IMAGE_TAG}"
+echo "    base:         ${BASE_IMAGE}"
+echo "    runtime user: ${RUNTIME_USER}"
 docker build \
   --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
-  ${RUNTIME_USER:+--build-arg "RUNTIME_USER=${RUNTIME_USER}"} \
+  --build-arg "RUNTIME_USER=${RUNTIME_USER}" \
   --tag "${IMAGE_TAG}" \
   "${HERE}"
+
+echo "==> checking the image runs as ${RUNTIME_USER}"
+actual_user="$(docker run --rm --entrypoint python3 "${IMAGE_TAG}" -c 'import getpass; print(getpass.getuser())')"
+if [ "${actual_user}" != "${RUNTIME_USER}" ]; then
+  echo "ERROR: image runs as '${actual_user}', expected '${RUNTIME_USER}'" >&2
+  exit 1
+fi
 
 echo "==> checking the base image was not swapped underneath the patches"
 docker run --rm --entrypoint python3 "${IMAGE_TAG}" \
@@ -32,7 +46,8 @@ docker run --rm --entrypoint python3 "${IMAGE_TAG}" \
 
 if [ "${SKIP_TESTS}" != "1" ]; then
   echo "==> running the patch test suite inside the image"
-  docker run --rm --entrypoint sh "${IMAGE_TAG}" -c '
+  # As root, because the runtime user cannot install into site-packages.
+  docker run --rm --user root --entrypoint sh "${IMAGE_TAG}" -c '
     set -e
     python3 -m pip install --quiet --disable-pip-version-check pytest pytest-asyncio
     cd /opt/litellm-patches
