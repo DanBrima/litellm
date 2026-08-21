@@ -1,0 +1,31 @@
+--- a/litellm/litellm_core_utils/litellm_logging.py
++++ b/litellm/litellm_core_utils/litellm_logging.py
+@@ -4903,9 +4903,11 @@
+ 
+         additional_logging_headers: StandardLoggingAdditionalHeaders = {}
+ 
++        typed_header_names = set()
+         for key in StandardLoggingAdditionalHeaders.__annotations__.keys():
+             _key = key.lower()
+             _key = _key.replace("_", "-")
++            typed_header_names.add(_key)
+             if _key in additiona_headers:
+                 try:
+                     additional_logging_headers[key] = int(additiona_headers[_key])  # type: ignore
+@@ -4913,6 +4915,16 @@
+                     verbose_logger.debug(
+                         f"Could not convert {additiona_headers[_key]} to int for key {key}."
+                     )
++
++        # The v3 rate limiter reports each scope it enforced as
++        # x-ratelimit-{descriptor_key}-{remaining,limit}-{requests,tokens}. The
++        # descriptor key is dynamic, so those headers cannot be typed fields
++        # above, and dropping them here leaves the rate limit gauges with
++        # nothing to read.
++        for header, value in additiona_headers.items():
++            if header.startswith("x-ratelimit-") and header not in typed_header_names:
++                additional_logging_headers[header] = value  # type: ignore
++
+         return additional_logging_headers
+ 
+     @staticmethod

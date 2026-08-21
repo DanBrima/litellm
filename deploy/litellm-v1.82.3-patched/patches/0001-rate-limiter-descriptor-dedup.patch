@@ -1,0 +1,64 @@
+--- a/litellm/proxy/hooks/parallel_request_limiter_v3.py
++++ b/litellm/proxy/hooks/parallel_request_limiter_v3.py
+@@ -15,6 +15,7 @@
+     List,
+     Literal,
+     Optional,
++    Tuple,
+     TypedDict,
+     Union,
+     cast,
+@@ -1055,6 +1056,23 @@
+ 
+         return descriptors
+ 
++    @staticmethod
++    def _deduplicate_descriptors(
++        descriptors: List[RateLimitDescriptor],
++    ) -> List[RateLimitDescriptor]:
++        """
++        Collapse descriptors repeating a (key, value) pair to their first occurrence.
++
++        A descriptor identifies one counter, and every consumer below charges
++        the request once per descriptor it is given. A repeat therefore
++        increments the sliding window twice and reserves TPM tokens twice
++        against that same counter, halving the limit the operator configured.
++        """
++        by_identity: Dict[Tuple[str, str], RateLimitDescriptor] = {}
++        for descriptor in descriptors:
++            by_identity.setdefault((descriptor["key"], descriptor["value"]), descriptor)
++        return list(by_identity.values())
++
+     async def _check_model_has_recent_failures(
+         self,
+         model: str,
+@@ -1267,7 +1285,7 @@
+             )
+ 
+         # Create rate limit descriptors
+-        descriptors = self._create_rate_limit_descriptors(
++        assembled_descriptors = self._create_rate_limit_descriptors(
+             user_api_key_dict=user_api_key_dict,
+             data=data,
+             rpm_limit_type=rpm_limit_type,
+@@ -1279,15 +1297,18 @@
+         self._add_team_model_rate_limit_descriptor_from_metadata(
+             user_api_key_dict=user_api_key_dict,
+             requested_model=requested_model,
+-            descriptors=descriptors,
++            descriptors=assembled_descriptors,
+         )
+ 
+         # Org Level Rate Limits
+-        descriptors.extend(
++        assembled_descriptors.extend(
+             self.create_organization_rate_limit_descriptor(
+                 user_api_key_dict, requested_model
+             )
+         )
++
++        descriptors = self._deduplicate_descriptors(assembled_descriptors)
++
+         # Only check rate limits if we have descriptors with actual limits
+         if descriptors:
+             response = await self.should_rate_limit(

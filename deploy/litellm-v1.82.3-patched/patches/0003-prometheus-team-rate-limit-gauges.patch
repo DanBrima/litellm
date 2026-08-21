@@ -1,0 +1,299 @@
+--- a/litellm/types/integrations/prometheus.py
++++ b/litellm/types/integrations/prometheus.py
+@@ -235,6 +235,10 @@
+     "litellm_deployment_rpm_limit",
+     "litellm_remaining_api_key_requests_for_model",
+     "litellm_remaining_api_key_tokens_for_model",
++    "litellm_remaining_team_requests_for_model",
++    "litellm_remaining_team_tokens_for_model",
++    "litellm_team_rpm_limit",
++    "litellm_team_tpm_limit",
+     "litellm_llm_api_failed_requests_metric",
+     "litellm_callback_logging_failures_metric",
+     "litellm_in_flight_requests",
+@@ -580,6 +584,18 @@
+         UserAPIKeyLabelNames.MODEL_ID.value,
+     ]
+ 
++    litellm_remaining_team_requests_for_model = [
++        UserAPIKeyLabelNames.TEAM.value,
++        UserAPIKeyLabelNames.TEAM_ALIAS.value,
++        UserAPIKeyLabelNames.v1_LITELLM_MODEL_NAME.value,
++    ]
++
++    litellm_remaining_team_tokens_for_model = litellm_remaining_team_requests_for_model
++
++    litellm_team_rpm_limit = litellm_remaining_team_requests_for_model
++
++    litellm_team_tpm_limit = litellm_remaining_team_requests_for_model
++
+     litellm_llm_api_failed_requests_metric = [
+         UserAPIKeyLabelNames.END_USER.value,
+         UserAPIKeyLabelNames.API_KEY_HASH.value,
+@@ -761,6 +777,9 @@
+     def labels(self, *args, **kwargs):
+         return self
+ 
++    def remove(self, *labelvalues):
++        pass
++
+     def inc(self, *args, **kwargs):
+         pass
+ 
+--- a/litellm/integrations/prometheus.py
++++ b/litellm/integrations/prometheus.py
+@@ -14,6 +14,8 @@
+     List,
+     Literal,
+     Optional,
++    Protocol,
++    Sequence,
+     Tuple,
+     Union,
+     cast,
+@@ -63,6 +65,34 @@
+     return _get_end_user_id_for_cost_tracking
+ 
+ 
++class _LabeledGauge(Protocol):
++    """Structural type shared by ``prometheus_client.Gauge`` and ``NoOpMetric``."""
++
++    def labels(self, *args: Any, **kwargs: Any) -> Any:
++        ...
++
++    def set(self, value: float) -> None:
++        ...
++
++    def remove(self, *labelvalues: str) -> None:
++        ...
++
++
++_TEAM_RATE_LIMIT_GAUGE_SPECS: Tuple[
++    Tuple[
++        DEFINED_PROMETHEUS_METRICS,
++        Literal["remaining", "limit"],
++        Literal["requests", "tokens"],
++    ],
++    ...,
++] = (
++    ("litellm_remaining_team_requests_for_model", "remaining", "requests"),
++    ("litellm_remaining_team_tokens_for_model", "remaining", "tokens"),
++    ("litellm_team_rpm_limit", "limit", "requests"),
++    ("litellm_team_tpm_limit", "limit", "tokens"),
++)
++
++
+ class PrometheusLogger(CustomLogger):
+     # Class variables or attributes
+     def __init__(  # noqa: PLR0915
+@@ -252,6 +282,38 @@
+             )
+ 
+             ########################################
++            # LiteLLM Team rate limit metrics
++            ########################################
++
++            self.litellm_remaining_team_requests_for_model = self._gauge_factory(
++                "litellm_remaining_team_requests_for_model",
++                "Remaining Requests team can make for model (model based rpm limit on team)",
++                labelnames=self.get_labels_for_metric(
++                    "litellm_remaining_team_requests_for_model"
++                ),
++            )
++
++            self.litellm_remaining_team_tokens_for_model = self._gauge_factory(
++                "litellm_remaining_team_tokens_for_model",
++                "Remaining Tokens team can make for model (model based tpm limit on team)",
++                labelnames=self.get_labels_for_metric(
++                    "litellm_remaining_team_tokens_for_model"
++                ),
++            )
++
++            self.litellm_team_rpm_limit = self._gauge_factory(
++                "litellm_team_rpm_limit",
++                "Configured RPM limit for team + model (model based rpm limit on team)",
++                labelnames=self.get_labels_for_metric("litellm_team_rpm_limit"),
++            )
++
++            self.litellm_team_tpm_limit = self._gauge_factory(
++                "litellm_team_tpm_limit",
++                "Configured TPM limit for team + model (model based tpm limit on team)",
++                labelnames=self.get_labels_for_metric("litellm_team_tpm_limit"),
++            )
++
++            ########################################
+             # LLM API Deployment Metrics / analytics
+             ########################################
+ 
+@@ -1037,6 +1099,15 @@
+             model_id=enum_values.model_id,
+         )
+ 
++        # set team rpm/tpm metrics for the requested model
++        self._set_team_rate_limit_metrics(
++            user_api_team=user_api_team,
++            user_api_team_alias=user_api_team_alias,
++            model_group=standard_logging_payload["model_group"],
++            combined_metadata=combined_metadata,
++            standard_logging_payload=standard_logging_payload,
++        )
++
+         # set latency metrics
+         self._set_latency_metrics(
+             kwargs=kwargs,
+@@ -1292,6 +1363,155 @@
+             _sanitize_prometheus_label_value(model_id),
+         ).set(remaining_tokens)
+ 
++    @staticmethod
++    def _get_v3_rate_limit_header(
++        standard_logging_payload: Optional[StandardLoggingPayload],
++        descriptor_key: Literal["model_per_key", "model_per_team"],
++        value_type: Literal["remaining", "limit"],
++        rate_limit_type: Literal["requests", "tokens"],
++    ) -> Optional[int]:
++        """
++        Read a per-(scope, model) value emitted by the v3 rate limiter
++        (``parallel_request_limiter_v3.py``), which writes
++        ``x-ratelimit-{descriptor_key}-{remaining,limit}-{requests,tokens}``
++        into ``standard_logging_object.hidden_params.additional_headers``.
++        The header carries no model group; it always refers to this request's
++        model group, which is what the gauges are labeled with. A scope with
++        no configured limit produces no header at all. Values are written
++        in-process as plain ints (never HTTP-serialized strings), so anything
++        else is rejected rather than coerced.
++        """
++        if standard_logging_payload is None:
++            return None
++        hidden_params = standard_logging_payload.get("hidden_params")
++        if hidden_params is None:
++            return None
++        additional_headers = hidden_params.get("additional_headers")
++        if additional_headers is None:
++            return None
++        value = dict(additional_headers).get(
++            f"x-ratelimit-{descriptor_key}-{value_type}-{rate_limit_type}"
++        )
++        if isinstance(value, bool) or not isinstance(value, int):
++            return None
++        return value
++
++    def _set_team_rate_limit_metrics(
++        self,
++        user_api_team: Optional[str],
++        user_api_team_alias: Optional[str],
++        model_group: Optional[str],
++        combined_metadata: Dict[str, Any],
++        standard_logging_payload: Optional[StandardLoggingPayload],
++    ) -> None:
++        """
++        Emit the per-(team, model) rate limit gauges from the values the v3
++        rate limiter already computed for its ``model_per_team`` descriptor
++        and shipped to the client as ``x-ratelimit-model_per_team-*`` headers.
++        A team with no per-model limit configured for the requested model
++        produces no header, and therefore no series, which matches how the
++        per-key gauges behave.
++        """
++        if user_api_team is None:
++            return
++
++        enum_values = UserAPIKeyLabelValues(
++            team=user_api_team,
++            team_alias=user_api_team_alias,
++            model=model_group,
++            custom_metadata_labels=get_custom_labels_from_metadata(
++                metadata=combined_metadata
++            ),
++        )
++
++        for metric_name, value_type, rate_limit_type in _TEAM_RATE_LIMIT_GAUGE_SPECS:
++            self._sync_team_rate_limit_gauge(
++                gauge=getattr(self, metric_name),
++                metric_name=metric_name,
++                value=self._get_v3_rate_limit_header(
++                    standard_logging_payload=standard_logging_payload,
++                    descriptor_key="model_per_team",
++                    value_type=value_type,
++                    rate_limit_type=rate_limit_type,
++                ),
++                enum_values=enum_values,
++            )
++
++    def _sync_team_rate_limit_gauge(
++        self,
++        gauge: _LabeledGauge,
++        metric_name: DEFINED_PROMETHEUS_METRICS,
++        value: Optional[int],
++        enum_values: UserAPIKeyLabelValues,
++    ) -> None:
++        """
++        Set the gauge, or drop its child series when this team has no limit
++        configured for this model. Prometheus keeps a child series for the
++        life of the process once emitted, so without the drop a team whose
++        limit is removed would keep publishing the last remaining/limit
++        values it ever saw, and alerts would evaluate against a number no
++        longer being enforced.
++        """
++        labelnames = self.get_labels_for_metric(metric_name)
++        if UserAPIKeyLabelNames.TEAM.value not in labelnames:
++            # Without a team label the gauge collapses to one sample shared by
++            # every team, which cannot attribute a limit to anyone and cannot
++            # be retired. Publishing nothing beats publishing a number that
++            # silently belongs to whichever team wrote it last.
++            return
++
++        labels = prometheus_label_factory(
++            supported_enum_labels=labelnames,
++            enum_values=enum_values,
++        )
++        if value is not None:
++            self._drop_superseded_team_series(
++                gauge=gauge, labelnames=labelnames, labels=labels
++            )
++            gauge.labels(**labels).set(value)
++            return
++
++        try:
++            gauge.remove(*(labels.get(name) or "" for name in labelnames))
++        except KeyError:
++            # No child series for this labelset, which is the common case:
++            # the team never had a limit for this model.
++            pass
++
++    def _drop_superseded_team_series(
++        self,
++        gauge: _LabeledGauge,
++        labelnames: Sequence[str],
++        labels: Dict[str, Any],
++    ) -> None:
++        """
++        Retire child series that describe this same team and model under a
++        different alias. Renaming a team changes ``team_alias``, which starts a
++        new series, and the old one would otherwise keep publishing the values
++        it held at rename time, double counting the team on any sum over
++        ``team``.
++        """
++        collect = getattr(gauge, "collect", None)
++        if collect is None:
++            return
++
++        team_label = UserAPIKeyLabelNames.TEAM.value
++        alias_label = UserAPIKeyLabelNames.TEAM_ALIAS.value
++        model_label = UserAPIKeyLabelNames.v1_LITELLM_MODEL_NAME.value
++        superseded = tuple(
++            tuple(sample.labels.get(name, "") for name in labelnames)
++            for metric in collect()
++            for sample in metric.samples
++            if sample.labels.get(team_label) == labels.get(team_label)
++            and sample.labels.get(model_label) == labels.get(model_label)
++            and sample.labels.get(alias_label) != labels.get(alias_label)
++        )
++        for label_values in superseded:
++            try:
++                gauge.remove(*label_values)
++            except KeyError:
++                pass
++
+     def _set_latency_metrics(
+         self,
+         kwargs: dict,
