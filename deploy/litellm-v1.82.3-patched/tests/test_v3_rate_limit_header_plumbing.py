@@ -93,6 +93,7 @@ def _logger_with_registry(registry):
     with patch("litellm.integrations.prometheus.PrometheusLogger.__init__", return_value=None):
         logger = PrometheusLogger()
     logger.get_labels_for_metric = MagicMock(side_effect=PrometheusMetricLabels.get_labels)
+    logger._team_series_label_values = {}
     for metric_name in TEAM_GAUGES:
         setattr(
             logger,

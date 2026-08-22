@@ -51,6 +51,7 @@ def _logger_with_mock_team_gauges() -> PrometheusLogger:
     for metric_name in TEAM_RATE_LIMIT_METRICS:
         setattr(logger, metric_name, MagicMock())
     logger.get_labels_for_metric = MagicMock(side_effect=PrometheusMetricLabels.get_labels)
+    logger._team_series_label_values = {}
     return logger
 
 
@@ -331,6 +332,80 @@ def test_retires_the_old_series_when_a_team_is_renamed():
     renamed = {**TEAM_LABELS, "team_alias": "ml-research"}
     assert registry.get_sample_value("litellm_team_rpm_limit", renamed) == 60
     assert registry.get_sample_value("litellm_team_rpm_limit", TEAM_LABELS) is None
+
+
+def test_rename_survives_a_tracked_series_that_is_already_gone():
+    """
+    The tracked labelset can outlive the child series it names, for instance
+    when a cardinality cap evicts it. Retiring it must not break the emission
+    that triggered the retirement.
+    """
+    registry = CollectorRegistry()
+    gauge = Gauge("litellm_team_rpm_limit", "doc", labelnames=list(LABELNAMES), registry=registry)
+    logger = _logger_with_real_gauge("litellm_team_rpm_limit", gauge)
+    payload = _payload_with_headers({"x-ratelimit-model_per_team-limit-requests": 60})
+
+    _set_team_metrics(logger, payload)
+    gauge.remove(*(TEAM_LABELS[name] for name in LABELNAMES))
+    assert registry.get_sample_value("litellm_team_rpm_limit", TEAM_LABELS) is None
+
+    _set_team_metrics(logger, payload, team_alias="ml-research")
+
+    renamed = {**TEAM_LABELS, "team_alias": "ml-research"}
+    assert registry.get_sample_value("litellm_team_rpm_limit", renamed) == 60
+
+
+def test_retiring_a_rename_does_not_scan_the_registry():
+    """
+    Sweeping superseded aliases by scanning the metric's children costs every
+    team request work proportional to the number of team series ever emitted,
+    which ordinary authenticated traffic can amplify. The previous labelset is
+    remembered instead, so the gauge is never asked to enumerate itself.
+    """
+    logger = _logger_with_mock_team_gauges()
+    gauge = logger.litellm_team_rpm_limit
+    payload = _payload_with_headers({"x-ratelimit-model_per_team-limit-requests": 60})
+
+    _set_team_metrics(logger, payload)
+    _set_team_metrics(logger, payload, team_alias="ml-research")
+
+    gauge.collect.assert_not_called()
+    gauge.remove.assert_called_once_with("team-abc", "research", "gpt-4o-mini")
+
+
+def test_a_renamed_team_is_tracked_under_its_new_alias():
+    """Two renames in a row must retire the alias in between, not the original."""
+    logger = _logger_with_mock_team_gauges()
+    gauge = logger.litellm_team_rpm_limit
+    payload = _payload_with_headers({"x-ratelimit-model_per_team-limit-requests": 60})
+
+    _set_team_metrics(logger, payload)
+    _set_team_metrics(logger, payload, team_alias="ml-research")
+    _set_team_metrics(logger, payload, team_alias="platform")
+
+    assert [call.args for call in gauge.remove.call_args_list] == [
+        ("team-abc", "research", "gpt-4o-mini"),
+        ("team-abc", "ml-research", "gpt-4o-mini"),
+    ]
+
+
+def test_removing_a_limit_stops_tracking_the_series():
+    """
+    A team whose limit is removed and later restored must not have its own
+    live series retired by a stale tracking entry.
+    """
+    registry = CollectorRegistry()
+    gauge = Gauge("litellm_team_rpm_limit", "doc", labelnames=list(LABELNAMES), registry=registry)
+    logger = _logger_with_real_gauge("litellm_team_rpm_limit", gauge)
+    payload = _payload_with_headers({"x-ratelimit-model_per_team-limit-requests": 60})
+
+    _set_team_metrics(logger, payload)
+    _set_team_metrics(logger, _payload_with_headers({}))
+    assert registry.get_sample_value("litellm_team_rpm_limit", TEAM_LABELS) is None
+
+    _set_team_metrics(logger, payload)
+
+    assert registry.get_sample_value("litellm_team_rpm_limit", TEAM_LABELS) == 60
 
 
 def test_keeps_other_teams_when_one_team_is_renamed():

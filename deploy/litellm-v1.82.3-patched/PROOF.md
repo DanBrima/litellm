@@ -66,7 +66,7 @@ curl -sL http://127.0.0.1:4042/metrics/ -H "Authorization: Bearer $LITELLM_MASTE
 ## Stock v1.82.3
 
 ```
-team_id=b1d10dd3-948e-444a-ad62-460ba9155935   model_rpm_limit=4   model_tpm_limit=500
+team_id=66ec59c1-083e-4a1a-bfc7-8b7a380e8693   model_rpm_limit=4   model_tpm_limit=500
 
 request   http   rpm-remain rpm-limit tpm-remain tpm-limit
 #1        200    2          4        498        500
@@ -87,7 +87,7 @@ consumer charges once per descriptor. No team rate limit series exist at all
 ## Patched
 
 ```
-team_id=ba4cd071-4271-4bd4-8cc7-402ab415f085   model_rpm_limit=4   model_tpm_limit=500
+team_id=771a7c1c-2153-4675-94ad-4cf3f811a867   model_rpm_limit=4   model_tpm_limit=500
 
 request   http   rpm-remain rpm-limit tpm-remain tpm-limit
 #1        200    3          4        499        500
@@ -97,10 +97,10 @@ request   http   rpm-remain rpm-limit tpm-remain tpm-limit
 #5        429
 
 /metrics team rate limit series:
-  litellm_remaining_team_requests_for_model{model="fake-gpt",team="ba4cd071-...",team_alias="proof-patched"} 0.0
-  litellm_remaining_team_tokens_for_model{model="fake-gpt",team="ba4cd071-...",team_alias="proof-patched"} 406.0
-  litellm_team_rpm_limit{model="fake-gpt",team="ba4cd071-...",team_alias="proof-patched"} 4.0
-  litellm_team_tpm_limit{model="fake-gpt",team="ba4cd071-...",team_alias="proof-patched"} 500.0
+  litellm_remaining_team_requests_for_model{model="fake-gpt",team="771a7c1c-...",team_alias="proof-patched"} 0.0
+  litellm_remaining_team_tokens_for_model{model="fake-gpt",team="771a7c1c-...",team_alias="proof-patched"} 406.0
+  litellm_team_rpm_limit{model="fake-gpt",team="771a7c1c-...",team_alias="proof-patched"} 4.0
+  litellm_team_tpm_limit{model="fake-gpt",team="771a7c1c-...",team_alias="proof-patched"} 500.0
 ```
 
 Four requests admitted against a limit of 4, the fifth rejected. Each request
@@ -121,6 +121,40 @@ The TPM row is the one that is easy to miss. The pre-call reservation was
 charged per descriptor while post-call accounting only ever booked the estimate
 once, so team token limits were not just halved, they drifted from what the
 proxy actually recorded as spent
+
+## Renaming a team retires its old series
+
+Renaming a team changes `team_alias`, which starts a new Prometheus series. The
+old one has to be retired or the team is counted twice by any `sum by (team)`.
+On the same live proxy, with a team that starts as `before-rename`:
+
+```bash
+curl -s -X POST http://127.0.0.1:4052/team/update \
+  -H "Authorization: Bearer $LITELLM_MASTER_KEY" -H 'Content-Type: application/json' \
+  -d '{"team_id":"<team_id>","team_alias":"after-rename"}'
+```
+
+```
+after first request:
+  litellm_team_rpm_limit{model="fake-gpt",team="27d4a576-...",team_alias="before-rename"} 50.0
+
+after the rename and one more request:
+  litellm_team_rpm_limit{model="fake-gpt",team="27d4a576-...",team_alias="after-rename"} 50.0
+```
+
+One series for that team, under the new alias. The `before-rename` series is
+gone rather than frozen at its last value
+
+The rename does not take effect on the first request after `/team/update`,
+because the proxy serves the team object from its cache. It took about 12
+seconds here. That is LiteLLM's team cache, not anything these patches touch
+
+Retiring that old series is O(1): the labelset a team last published is
+remembered per (metric, team, model) and removed directly. It used to be found
+by scanning the gauge's children, which cost every team request work
+proportional to the number of team series ever emitted, and ordinary
+authenticated traffic could grow that. Two tests pin the new behaviour, and both
+fail against the scanning version
 
 ## Also checked
 
