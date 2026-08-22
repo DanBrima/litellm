@@ -17,6 +17,7 @@ TARBALL="${OUT_DIR}/${BUNDLE_NAME}.tar.gz"
 
 CONTENTS=(
   README.md
+  PROOF.md
   Dockerfile
   .dockerignore
   build.sh

@@ -141,7 +141,8 @@ method it does not exercise
 `model_rpm_limit: {fake-gpt: 4}` and `model_tpm_limit: {fake-gpt: 500}`, and a
 real virtual key on that team. Five identical requests, then a `/metrics`
 scrape. Run for a team with an alias and a team without one, since those take
-different paths through the label factory:
+different paths through the label factory. `PROOF.md` has the full run for both
+stock and patched, with the commands and the RPM and TPM numbers side by side:
 
 ```
 stock v1.82.3                          patched
