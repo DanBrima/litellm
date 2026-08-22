@@ -58,7 +58,7 @@
 +class _LabeledGauge(Protocol):
 +    """Structural type shared by ``prometheus_client.Gauge`` and ``NoOpMetric``."""
 +
-+    def labels(self, *args: Any, **kwargs: Any) -> Any:
++    def labels(self, *labelvalues: str) -> "_LabeledGauge":
 +        ...
 +
 +    def set(self, value: float) -> None:
@@ -141,7 +141,7 @@
          # set latency metrics
          self._set_latency_metrics(
              kwargs=kwargs,
-@@ -1292,6 +1363,155 @@
+@@ -1292,6 +1363,156 @@
              _sanitize_prometheus_label_value(model_id),
          ).set(remaining_tokens)
  
@@ -246,15 +246,16 @@
 +            supported_enum_labels=labelnames,
 +            enum_values=enum_values,
 +        )
++        label_values = tuple(labels.get(name, "") for name in labelnames)
 +        if value is not None:
 +            self._drop_superseded_team_series(
 +                gauge=gauge, labelnames=labelnames, labels=labels
 +            )
-+            gauge.labels(**labels).set(value)
++            gauge.labels(*label_values).set(value)
 +            return
 +
 +        try:
-+            gauge.remove(*(labels.get(name) or "" for name in labelnames))
++            gauge.remove(*label_values)
 +        except KeyError:
 +            # No child series for this labelset, which is the common case:
 +            # the team never had a limit for this model.

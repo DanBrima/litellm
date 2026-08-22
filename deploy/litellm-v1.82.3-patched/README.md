@@ -21,7 +21,7 @@ These track the fork branches, re-derived against 1.82.3 rather than
 cherry-picked, because both files drifted substantially between 1.82.3 and the
 branch base:
 
-- patch 1 tracks `litellm_rate_limiter_dedup` at `ed56cb0`, including its later
+- patch 1 tracks `litellm_rate_limiter_dedup` at `b3cc323`, including its later
   rewrite of `_deduplicate_descriptors` to build an immutable index and return a
   tuple. That version collapses a repeated `(key, value)` to the **last**
   occurrence rather than the first, which is what a dict comprehension does; on
@@ -29,10 +29,15 @@ branch base:
   survives makes no difference to behaviour. Returning a tuple means the two
   consumers that receive it, `should_rate_limit` and `_handle_rate_limit_error`,
   take a `Sequence` here as they do upstream; neither mutates what it is given
-- patch 3 tracks `litellm_team_rate_limit_prometheus_metrics` at `02088ce`
-  (PR #37215). 1.82.3 has no `_ExcludedLabelMetric`, no label context on
-  `prometheus_label_factory` and no v3 header reader, so the port keeps the
-  design and rewrites it in the idiom of the older file
+- patch 3 tracks `litellm_team_rate_limit_prometheus_metrics` at `7cb2641`
+  (PR #37215), including its later switch to passing gauge label values
+  positionally and computing them once. That switch matters here beyond style:
+  the keyword form wrote the series under whatever the label factory produced
+  for a missing value while `remove` looked it up as an empty string, so a team
+  with no alias published a series that could never be retired. 1.82.3 has no
+  `_ExcludedLabelMetric`, no label context on `prometheus_label_factory` and no
+  v3 header reader, so the port keeps the design and rewrites it in the idiom of
+  the older file
 
 Patch 2 is not part of either upstream PR. It is needed because 1.82.3 copies
 only four hard-coded header names into the standard logging payload, and the
@@ -109,10 +114,11 @@ They must run against an installed LiteLLM 1.82.3 with the patches applied;
 `model_per_team` descriptor twice per request, and the v3 rate limit headers are
 dropped before any logger sees them
 
-**44 tests** in `tests/`, covering the descriptor dedup, the header
-passthrough, the four gauges, stale-series removal on limit removal and on team
-rename, and the whole chain from a rate-limited request to a `/metrics` scrape.
-Against stock 1.82.3, 36 of them fail; against the patched tree all 44 pass
+**45 tests** in `tests/`, covering the descriptor dedup, the header
+passthrough, the four gauges, stale-series removal on limit removal, on team
+rename and for a team with no alias, and the whole chain from a rate-limited
+request to a `/metrics` scrape. Against stock 1.82.3, 37 of them fail; against
+the patched tree all 45 pass
 
 **LiteLLM's own v1.82.3 test suite** for every touched area
 (`tests/test_litellm/proxy/hooks`, `tests/test_litellm/integrations`,
@@ -134,7 +140,8 @@ method it does not exercise
 **A live proxy**, v1.82.3 with a real Postgres, a real team object carrying
 `model_rpm_limit: {fake-gpt: 4}` and `model_tpm_limit: {fake-gpt: 500}`, and a
 real virtual key on that team. Five identical requests, then a `/metrics`
-scrape:
+scrape. Run for a team with an alias and a team without one, since those take
+different paths through the label factory:
 
 ```
 stock v1.82.3                          patched

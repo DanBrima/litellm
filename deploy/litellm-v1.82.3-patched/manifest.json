@@ -2,7 +2,7 @@
   "base_version": "1.82.3",
   "files": {
     "litellm/integrations/prometheus.py": {
-      "after": "fa178b0abe624aa4d61847cd6296ed6443de145307409679dd5a72e4630fe1a3",
+      "after": "2c6d2c79deacbdbf425039ca490e77e865cc37d33755aa6374965d271576c603",
       "before": "49c99217ca2fc62b85a3e143cbb3c25222dab202c573bb4cefd8cf464d7da6f6"
     },
     "litellm/litellm_core_utils/litellm_logging.py": {
