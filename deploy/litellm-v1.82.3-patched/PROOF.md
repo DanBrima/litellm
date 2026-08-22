@@ -66,7 +66,7 @@ curl -sL http://127.0.0.1:4042/metrics/ -H "Authorization: Bearer $LITELLM_MASTE
 ## Stock v1.82.3
 
 ```
-team_id=66ec59c1-083e-4a1a-bfc7-8b7a380e8693   model_rpm_limit=4   model_tpm_limit=500
+team_id=2a72e576-d219-4ef4-b19f-a0d87f336e6a   model_rpm_limit=4   model_tpm_limit=500
 
 request   http   rpm-remain rpm-limit tpm-remain tpm-limit
 #1        200    2          4        498        500
@@ -87,7 +87,7 @@ consumer charges once per descriptor. No team rate limit series exist at all
 ## Patched
 
 ```
-team_id=771a7c1c-2153-4675-94ad-4cf3f811a867   model_rpm_limit=4   model_tpm_limit=500
+team_id=58333625-a060-4cde-a2e9-b42544276f3c   model_rpm_limit=4   model_tpm_limit=500
 
 request   http   rpm-remain rpm-limit tpm-remain tpm-limit
 #1        200    3          4        499        500
@@ -97,10 +97,10 @@ request   http   rpm-remain rpm-limit tpm-remain tpm-limit
 #5        429
 
 /metrics team rate limit series:
-  litellm_remaining_team_requests_for_model{model="fake-gpt",team="771a7c1c-...",team_alias="proof-patched"} 0.0
-  litellm_remaining_team_tokens_for_model{model="fake-gpt",team="771a7c1c-...",team_alias="proof-patched"} 406.0
-  litellm_team_rpm_limit{model="fake-gpt",team="771a7c1c-...",team_alias="proof-patched"} 4.0
-  litellm_team_tpm_limit{model="fake-gpt",team="771a7c1c-...",team_alias="proof-patched"} 500.0
+  litellm_remaining_team_requests_for_model{model="fake-gpt",team="58333625-...",team_alias="proof-patched"} 0.0
+  litellm_remaining_team_tokens_for_model{model="fake-gpt",team="58333625-...",team_alias="proof-patched"} 406.0
+  litellm_team_rpm_limit{model="fake-gpt",team="58333625-...",team_alias="proof-patched"} 4.0
+  litellm_team_tpm_limit{model="fake-gpt",team="58333625-...",team_alias="proof-patched"} 500.0
 ```
 
 Four requests admitted against a limit of 4, the fifth rejected. Each request
@@ -136,18 +136,19 @@ curl -s -X POST http://127.0.0.1:4052/team/update \
 
 ```
 after first request:
-  litellm_team_rpm_limit{model="fake-gpt",team="27d4a576-...",team_alias="before-rename"} 50.0
+  litellm_team_rpm_limit{model="fake-gpt",team="3a8c3bad-...",team_alias="before-rename"} 50.0
 
 after the rename and one more request:
-  litellm_team_rpm_limit{model="fake-gpt",team="27d4a576-...",team_alias="after-rename"} 50.0
+  litellm_team_rpm_limit{model="fake-gpt",team="3a8c3bad-...",team_alias="after-rename"} 50.0
 ```
 
 One series for that team, under the new alias. The `before-rename` series is
 gone rather than frozen at its last value
 
 The rename does not take effect on the first request after `/team/update`,
-because the proxy serves the team object from its cache. It took about 12
-seconds here. That is LiteLLM's team cache, not anything these patches touch
+because the proxy serves the team object from its cache. It took about 70
+seconds here, and about 12 on an earlier run. That is LiteLLM's team cache, not
+anything these patches touch
 
 Retiring that old series is O(1): the labelset a team last published is
 remembered per (metric, team, model) and removed directly. It used to be found
@@ -155,6 +156,44 @@ by scanning the gauge's children, which cost every team request work
 proportional to the number of team series ever emitted, and ordinary
 authenticated traffic could grow that. Two tests pin the new behaviour, and both
 fail against the scanning version
+
+## Retirement is skipped under multiprocess collection
+
+`prometheus_client` refuses to remove a labelset when `PROMETHEUS_MULTIPROC_DIR`
+is set, because each worker owns its own mmap file and cannot retire a series
+another worker wrote. It warns and leaves the sample in place. LiteLLM turns
+that mode on for multi-worker deployments, so retirement has to be skipped
+there rather than attempted on every request
+
+Same proxy, started with `PROMETHEUS_MULTIPROC_DIR` pointing at a directory,
+then a team **with** a limit and a team **without** one sending traffic:
+
+```
+  limited request 1 -> 200
+  limited request 2 -> 200
+  unlimited-team request 1 -> 200
+  unlimited-team request 2 -> 200
+  unlimited-team request 3 -> 200
+
+  team gauges under multiprocess collection:
+    litellm_team_rpm_limit{model="fake-gpt",pid="9954",team="7fa0f28e-...",team_alias="multiproc"} 4.0
+```
+
+Emission is untouched: the gauge is published, with the `pid` label
+`prometheus_client` adds in that mode. Only retirement is gated
+
+The unlimited team is the case that used to call `remove()` on every request,
+once per gauge, for nothing. Driving that same path in process, with warnings
+captured, shows what changed:
+
+```
+previous build, 3 requests from a team with no limit:  12 removal warnings
+gated build,    the same 3 requests:                    0
+```
+
+Twelve is four gauges times three requests. Those warnings do not reach the
+proxy log in the default logging setup, which is exactly why this was worth
+gating rather than leaving to be noticed in production
 
 ## Also checked
 

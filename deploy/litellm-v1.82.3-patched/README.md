@@ -29,18 +29,19 @@ branch base:
   survives makes no difference to behaviour. Returning a tuple means the two
   consumers that receive it, `should_rate_limit` and `_handle_rate_limit_error`,
   take a `Sequence` here as they do upstream; neither mutates what it is given
-- patch 3 tracks `litellm_team_rate_limit_prometheus_metrics` at `4e1d1fa`
-  (PR #37215), including its switch to passing gauge label values positionally
-  and its replacement of the registry scan with a remembered labelset per
-  (metric, team, model). Both matter here beyond style: the keyword form wrote
-  the series under whatever the label factory produced for a missing value
-  while `remove` looked it up as an empty string, so a team with no alias
-  published a series that could never be retired, and the scan cost every team
-  request work proportional to the number of team series ever emitted. 1.82.3
-  has no
-  `_ExcludedLabelMetric`, no label context on `prometheus_label_factory` and no
-  v3 header reader, so the port keeps the design and rewrites it in the idiom of
-  the older file
+- patch 3 tracks `litellm_team_rate_limit_prometheus_metrics` at `64fb3fa`
+  (PR #37215): the team gauges, positional label values, the remembered
+  labelset that replaced the registry scan, and the gate that skips retirement
+  under multiprocess collection. Each of the later three matters here beyond
+  style. The keyword form wrote the series under whatever the label factory
+  produced for a missing value while `remove` looked it up as an empty string,
+  so a team with no alias published a series that could never be retired. The
+  scan cost every team request work proportional to the number of team series
+  ever emitted. And `prometheus_client` cannot remove a labelset in
+  multiprocess mode, which LiteLLM enables for multi-worker deployments, so
+  retiring there only produced warnings. 1.82.3 has no `_ExcludedLabelMetric`,
+  no label context on `prometheus_label_factory` and no v3 header reader, so
+  the port keeps the design and rewrites it in the idiom of the older file
 
 Patch 2 is not part of either upstream PR. It is needed because 1.82.3 copies
 only four hard-coded header names into the standard logging payload, and the
@@ -117,11 +118,12 @@ They must run against an installed LiteLLM 1.82.3 with the patches applied;
 `model_per_team` descriptor twice per request, and the v3 rate limit headers are
 dropped before any logger sees them
 
-**49 tests** in `tests/`, covering the descriptor dedup, the header
+**53 tests** in `tests/`, covering the descriptor dedup, the header
 passthrough, the four gauges, stale-series removal on limit removal, on team
-rename and for a team with no alias, the O(1) rename sweep, and the whole chain
-from a rate-limited request to a `/metrics` scrape. Against stock 1.82.3, 41 of
-them fail; against the patched tree all 49 pass
+rename and for a team with no alias, the O(1) rename sweep, the multiprocess
+retirement gate, and the whole chain from a rate-limited request to a
+`/metrics` scrape. Against stock 1.82.3, 45 of them fail; against the patched
+tree all 53 pass
 
 **LiteLLM's own v1.82.3 test suite** for every touched area
 (`tests/test_litellm/proxy/hooks`, `tests/test_litellm/integrations`,

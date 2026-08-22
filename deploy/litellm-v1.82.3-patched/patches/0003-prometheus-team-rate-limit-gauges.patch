@@ -50,7 +50,7 @@
      Tuple,
      Union,
      cast,
-@@ -63,6 +64,34 @@
+@@ -63,6 +64,48 @@
      return _get_end_user_id_for_cost_tracking
  
  
@@ -82,10 +82,24 @@
 +)
 +
 +
++def _series_retirement_supported() -> bool:
++    """
++    ``prometheus_client`` refuses to remove a labelset in multiprocess mode and
++    warns when asked, because each worker owns its own mmap file and cannot
++    retire a series another worker wrote. Retirement is therefore a
++    single-process capability, and attempting it under multiprocess collection
++    would only emit warnings while leaving the sample in place.
++    """
++    return not (
++        "PROMETHEUS_MULTIPROC_DIR" in os.environ
++        or "prometheus_multiproc_dir" in os.environ
++    )
++
++
  class PrometheusLogger(CustomLogger):
      # Class variables or attributes
      def __init__(  # noqa: PLR0915
-@@ -74,6 +103,11 @@
+@@ -74,6 +117,11 @@
  
              # Always initialize label_filters, even for non-premium users
              self.label_filters = self._parse_prometheus_config()
@@ -97,7 +111,7 @@
  
              # Create metric factory functions
              self._counter_factory = self._create_metric_factory(Counter)
-@@ -252,6 +286,38 @@
+@@ -252,6 +300,38 @@
              )
  
              ########################################
@@ -136,7 +150,7 @@
              # LLM API Deployment Metrics / analytics
              ########################################
  
-@@ -1037,6 +1103,15 @@
+@@ -1037,6 +1117,15 @@
              model_id=enum_values.model_id,
          )
  
@@ -152,7 +166,7 @@
          # set latency metrics
          self._set_latency_metrics(
              kwargs=kwargs,
-@@ -1292,6 +1367,176 @@
+@@ -1292,6 +1381,181 @@
              _sanitize_prometheus_label_value(model_id),
          ).set(remaining_tokens)
  
@@ -262,11 +276,16 @@
 +            enum_values=enum_values,
 +        )
 +        label_values = tuple(labels.get(name, "") for name in labelnames)
-+        self._drop_superseded_team_series(
-+            gauge=gauge, metric_name=metric_name, labels=labels, label_values=label_values
-+        )
++        can_retire = _series_retirement_supported()
++        if can_retire:
++            self._drop_superseded_team_series(
++                gauge=gauge, metric_name=metric_name, labels=labels, label_values=label_values
++            )
 +        if value is not None:
 +            gauge.labels(*label_values).set(value)
++            return
++
++        if not can_retire:
 +            return
 +
 +        self._forget_team_series(metric_name=metric_name, labels=labels)

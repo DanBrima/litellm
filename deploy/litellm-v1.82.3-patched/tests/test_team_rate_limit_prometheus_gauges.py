@@ -45,6 +45,16 @@ ALL_TEAM_HEADERS = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _single_process_collection(monkeypatch):
+    """
+    Series retirement is only possible outside multiprocess collection, so pin
+    the mode rather than depending on whatever the ambient environment has set.
+    """
+    monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
+    monkeypatch.delenv("prometheus_multiproc_dir", raising=False)
+
+
 def _logger_with_mock_team_gauges() -> PrometheusLogger:
     with patch("litellm.integrations.prometheus.PrometheusLogger.__init__", return_value=None):
         logger = PrometheusLogger()
@@ -454,3 +464,58 @@ def test_label_filters_narrow_team_gauges_without_dropping_the_team_label():
 
     for metric_name in TEAM_RATE_LIMIT_METRICS:
         assert logger.get_labels_for_metric(metric_name) == ["team", "model"]
+
+
+def test_does_not_attempt_retirement_under_multiprocess_collection(monkeypatch):
+    """
+    prometheus_client refuses to remove a labelset when PROMETHEUS_MULTIPROC_DIR
+    is set, warning instead, because a worker cannot retire a series another
+    worker wrote. Attempting it on every team request would emit warnings while
+    leaving the sample in place, so the gauges are set and nothing is retired.
+    """
+    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", "/tmp/does-not-need-to-exist")
+    logger = _logger_with_mock_team_gauges()
+
+    _set_team_metrics(logger, _payload_with_headers(dict(ALL_TEAM_HEADERS)))
+    _set_team_metrics(logger, _payload_with_headers({}))
+
+    _assert_set_once(logger, "litellm_remaining_team_requests_for_model", 42)
+    for metric_name in TEAM_RATE_LIMIT_METRICS:
+        getattr(logger, metric_name).remove.assert_not_called()
+
+
+def test_a_rename_is_not_swept_under_multiprocess_collection(monkeypatch):
+    """The superseded-alias sweep is the other caller of remove()."""
+    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", "/tmp/does-not-need-to-exist")
+    logger = _logger_with_mock_team_gauges()
+    payload = _payload_with_headers({"x-ratelimit-model_per_team-limit-requests": 60})
+
+    _set_team_metrics(logger, payload)
+    _set_team_metrics(logger, payload, team_alias="ml-research")
+
+    logger.litellm_team_rpm_limit.remove.assert_not_called()
+
+
+def test_gauges_still_populate_under_multiprocess_collection(monkeypatch):
+    """Only retirement is gated. Emission has to keep working under both modes."""
+    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", "/tmp/does-not-need-to-exist")
+    logger = _logger_with_mock_team_gauges()
+
+    _set_team_metrics(logger, _payload_with_headers(dict(ALL_TEAM_HEADERS)))
+
+    _assert_set_once(logger, "litellm_remaining_team_requests_for_model", 42)
+    _assert_set_once(logger, "litellm_remaining_team_tokens_for_model", 900)
+    _assert_set_once(logger, "litellm_team_rpm_limit", 100)
+    _assert_set_once(logger, "litellm_team_tpm_limit", 1000)
+
+
+def test_retires_series_when_collection_is_single_process(monkeypatch):
+    monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
+    monkeypatch.delenv("prometheus_multiproc_dir", raising=False)
+    logger = _logger_with_mock_team_gauges()
+
+    _set_team_metrics(logger, _payload_with_headers(dict(ALL_TEAM_HEADERS)))
+    _set_team_metrics(logger, _payload_with_headers({}))
+
+    for metric_name in TEAM_RATE_LIMIT_METRICS:
+        getattr(logger, metric_name).remove.assert_called_once_with("team-abc", "research", "gpt-4o-mini")
