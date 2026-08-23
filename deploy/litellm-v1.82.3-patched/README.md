@@ -80,13 +80,22 @@ Knobs on `build.sh`, all environment variables:
   `RUNTIME_USER=root`. To pin the base by digest instead of tag, today's
   `main-v1.82.3` is
   `sha256:3e55452ab78e6ee477b1ae8dade43de7c7aac1d22f3af2e9cf405e7ed3eedc7c`
+- `PLATFORM` (default `linux/amd64`). The base is a multi-arch manifest, so a
+  builder picks its own architecture unless told otherwise. Building on an arm64
+  machine for an amd64 cluster produces an image whose every binary dies with
+  `exec format error`, which reads like missing files rather than a wrong
+  architecture. `build.sh` pins the platform and then fails if the built image
+  does not carry the expected one. Building cross-architecture needs qemu
+  emulation on the builder, since the layer runs python during the build
 - `IMAGE_TAG`, `OUT_DIR`, `TAR_NAME`
 - `SKIP_TESTS=1` skips the in-container pytest run, which is the only build step
-  that needs network. The SHA-256, runtime-user and import checks still run
+  that needs network. The SHA-256, architecture, runtime-user and import checks
+  still run
 
 The build fails loudly rather than shipping a half-patched image if the base is
 not stock 1.82.3, if a patch does not apply exactly, if the patched modules do
-not import, or if the image would run as the wrong user
+not import, if the image would run as the wrong user, or if it came out for the
+wrong architecture
 
 Patching happens as root because site-packages is not writable by `nobody`, and
 the layer switches back to `RUNTIME_USER` at the end. Each patched module's
@@ -99,6 +108,20 @@ blocks the registry blob hosts for both ghcr.io and Docker Hub, so no base image
 can be pulled here. Everything the build does to LiteLLM was instead run
 directly against a real 1.82.3 install, which is what the validation below
 covers
+
+## If the container will not start
+
+`exec /app/docker/prod_entrypoint.sh: exec format error`, or any command in the
+image looking like it does not exist, means the image architecture does not
+match the host. Check it:
+
+```bash
+docker image inspect <image> --format '{{.Architecture}}'
+```
+
+Rebuild with `PLATFORM` set to what the target runs, or build on a host of that
+architecture. Nothing is missing from the image when this happens; the binaries
+are simply for another CPU
 
 ## Running the tests
 
