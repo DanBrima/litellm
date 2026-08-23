@@ -51,6 +51,33 @@ backport of behaviour that shipped later: it keeps `x-ratelimit-*` only, and
 provider headers are still dropped. Without it patch 3 applies cleanly, imports
 cleanly, and silently publishes nothing
 
+## Building it on your own base, air-gapped
+
+`BASE_IMAGE` is required and should be the LiteLLM 1.82.3 image you already run,
+from your own registry. The patched image then inherits everything that one
+carries, your CA tooling and certs included, and differs from it only by the
+three patches here. Building on the public ghcr.io image drops all of that,
+which is how `update-ca-certificates` goes missing:
+
+```bash
+tar xzf litellm-v1.82.3-team-rate-limits.tar.gz
+cd litellm-v1.82.3-team-rate-limits
+
+BASE_IMAGE=registry.example/litellm-non-root:v1.82.3 \
+IMAGE_TAG=registry.example/litellm-non-root:v1.82.3-team-rate-limits \
+  ./build.sh
+
+podman push registry.example/litellm-non-root:v1.82.3-team-rate-limits
+```
+
+Nothing in the build reaches outside your network except pulling `BASE_IMAGE`
+from your own registry, with one exception: the in-container test run installs
+pytest. On a builder with no network use `SKIP_TESTS=1`; the SHA-256,
+architecture, runtime-user and import checks still run, and the suite can be run
+separately anywhere that has pytest
+
+`docker` and `podman` both work, auto-detected, or set `CONTAINER_CLI`
+
 ## Getting it onto a host
 
 `make_bundle.sh` packs everything here into one tar. `build.sh` turns that into
@@ -74,12 +101,14 @@ runs the test suite there before saving the tar
 
 Knobs on `build.sh`, all environment variables:
 
-- `BASE_IMAGE` (default `ghcr.io/berriai/litellm-non_root:main-v1.82.3`) and
-  `RUNTIME_USER` (default `nobody`). Override both together to build on a
-  different variant; the root image is `ghcr.io/berriai/litellm:v1.82.3` with
-  `RUNTIME_USER=root`. To pin the base by digest instead of tag, today's
-  `main-v1.82.3` is
-  `sha256:3e55452ab78e6ee477b1ae8dade43de7c7aac1d22f3af2e9cf405e7ed3eedc7c`
+- `BASE_IMAGE`, required, no default. The public non-root image is
+  `ghcr.io/berriai/litellm-non_root:main-v1.82.3`, digest
+  `sha256:3e55452ab78e6ee477b1ae8dade43de7c7aac1d22f3af2e9cf405e7ed3eedc7c`, but
+  prefer your own registry's copy so nothing your image adds is lost
+- `RUNTIME_USER` (default `nobody`). Set it to `root` when basing on a root
+  image variant, so the patch layer does not leave a non-root image running as
+  root or the reverse
+- `CONTAINER_CLI` (auto-detected: `docker`, else `podman`)
 - `PLATFORM` (default `linux/amd64`). The base is a multi-arch manifest, so a
   builder picks its own architecture unless told otherwise. Building on an arm64
   machine for an amd64 cluster produces an image whose every binary dies with
